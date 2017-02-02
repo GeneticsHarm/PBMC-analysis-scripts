@@ -1,0 +1,392 @@
+---
+title: "pbmc6k clustering"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+
+library(Seurat)
+library(dplyr)
+library(Matrix)
+```
+
+## Load and prepare the data
+
+Load the the count matrix and remove all the genes/rows with zero counts.
+```{r load}
+# Load data.
+pbmc.data <- read.table("~/Documents/Stage/Matrices/count-matrix-6k-v2.tsv", row.names=1, header=T)
+# Remove all genes with zero counts.
+pbmc.data <- pbmc.data[apply(pbmc.data[,-1], 1, function(x) !all(x==0)),]
+```
+
+The rownames are ensembl gene ids, this is the standard output from featureCount. Convert the rownames from ensembl gene ids to gene name using biomaRt.
+
+Get a dataframe with gene names corresponding to the ensemle id's in the data.
+```{r biomaRt}
+library(biomaRt)
+ensembl = useMart("ensembl", dataset="hsapiens_gene_ensembl")
+gene.name.table <- getBM(attributes = c("external_gene_name", "ensembl_gene_id"), 
+                    filters = "ensembl_gene_id",
+                    values = rownames(pbmc.data),
+                    mart = ensembl)
+```
+
+Not all ensembl ids are present in the BioMart database, so only set when available.
+```{r gene_names}
+get.gene.name <- function(ensemble.id) {
+  gene.name <- gene.name.table[gene.name.table$ensembl_gene_id == ensemble.id, 1]
+  if (identical(gene.name, character(0)) || gene.name == "") {
+    gene.name <- ensemble.id
+  }
+  return(gene.name)
+}
+rownames(pbmc.data) <- make.names(lapply(rownames(pbmc.data), get.gene.name), unique = T)
+```
+
+Searat can handle regular and sparse matrices, but the latter result in significant memory and speed savings. So create a sparse matrix.
+```{r sparse_matrix}
+pbmc.data.sparse <- Matrix(as.matrix(pbmc.data), sparse = T)
+```
+
+## Creating the searat object and QC
+
+Initialize the Seurat object with the raw (non-normalized data).
+Keep all genes expressed in >= 3 cells, keep all cells with >= 200 genes.
+Perform log-normalization, first scaling each cell to a total of 1e4 molecules (as in Macosko et al. Cell 2015).
+```{r setup_seurat, results="hide"}
+pbmc <- new("seurat", raw.data = pbmc.data.sparse)
+pbmc <- Setup(pbmc, min.cells = 3, min.genes = 200, do.logNormalize = T, total.expr = 1e4, project = "10X_PBMC")
+```
+
+Number of remaining cells = 5418/5419.
+```{r length_check}
+length(pbmc@cell.names)
+```
+
+Extract the mitochondrial genes.
+```{r mito_genes}
+mito.genes <- grep("^MT\\.", rownames(pbmc@data), value = T)
+percent.mito <- colSums(expm1(pbmc@data[mito.genes, ]))/colSums(expm1(pbmc@data))
+pbmc <- AddMetaData(pbmc, percent.mito, "percent.mito")
+```
+
+```{r violin_plot}
+VlnPlot(pbmc, c("nGene", "nUMI", "percent.mito"), nCol = 3)
+```
+
+Plot the total percentage of mitocondrial genes and the number of genes against the number of UMIs.
+```{r umi_plots}
+par(mfrow = c(1, 2))
+GenePlot(pbmc, "nUMI", "percent.mito")
+abline(h = 0.05, lty = 2) 
+GenePlot(pbmc, "nUMI", "nGene")
+abline(h = 2500, lty = 2) 
+par(mfrow = c(1, 1))
+```
+
+Cut-off cells with cells with more then 2500 gene's, they are possible multiplets. And cut-off cells with more than 0.05 percent mitochondrial rna.
+```{r subset}
+pbmc <- SubsetData(pbmc, subset.name = "nGene", accept.high = 2500)
+pbmc <- SubsetData(pbmc, subset.name = "percent.mito", accept.high = 0.05)
+length(pbmc@cell.names)
+```
+5142 cells remain.
+
+```{r}
+pbmc@var.genes
+```
+
+Regress out the number of molecules and the percentage mitochondrial genes.
+```{r regress_out, results="hide"}
+pbmc <- RegressOut(pbmc, latent.vars = c("nUMI", "percent.mito"))
+```
+
+## Detect variable genes
+
+Detection of variable genes across the single cells.
+This is done by "calculating the average expression and dispersion for each gene, placing these genes into bins, and then calculating a z-score for dispersion within each bin".
+These are "typical parameter settings for UMI data that is normalized to a total of 1e4 molecules".
+```{r var_genes, results="hide"}
+pbmc <- MeanVarPlot(pbmc ,fxn.x = expMean, fxn.y = logVarDivMean, x.low.cutoff = 0.0125, x.high.cutoff = 3, y.cutoff = 0.5, do.contour = F)
+length(pbmc@var.genes)
+```
+
+## PCA and tSNE
+
+Only run PCA on variable genes.
+According to the toturial, using all the genes yields the same results, but is significantly slower.
+```{r pca}
+pbmc <- PCA(pbmc, pc.genes = pbmc@var.genes, do.print = TRUE, pcs.print = 5, genes.print = 5)
+```
+
+Project principal components on all genes (including non-variable genes).
+```{r project_pca, results="hide"}
+pbmc <- ProjectPCA(pbmc)
+```
+
+Examine and visualize PCA results a few different ways.
+```{r print_pca}
+PrintPCA(pbmc, pcs.print = 1:5, genes.print = 10, use.full = TRUE)
+```
+
+```{r viz_pca}
+VizPCA(pbmc, 1:2)
+```
+
+```{r pca_plot}
+PCAPlot(pbmc, 1, 2)
+```
+
+```{r pc_heatmap, warning=FALSE}
+PCHeatmap(pbmc, pc.use = 1, cells.use = 100, do.balanced = TRUE)
+```
+
+```{r pc_heatmap_12, warning=FALSE}
+PCHeatmap(pbmc, pc.use = 1:12, cells.use = 500, do.balanced = TRUE, label.columns = FALSE, use.full = FALSE)
+```
+
+To compute the significance of the PCs the tutorial uses the "JackStraw" method. This is very CPU intensice, I aborted after 1 hour.
+A more ad hoc method is to identify the elbow of this plot, and select the PC's up to this points.
+```{r pca_elbow_plot}
+PCElbowPlot(pbmc)
+```
+The elbow falls around PC 10.
+
+
+Determine distances bases on the first 10 PC's.
+"resolutioan parameter between 0.6-1.2 typically returns good results for single cell dataset"
+save.SNN=T saves the SNN so that the SLM algorithm can be rerun using the same graph, but with a different resolution value.
+```{r find_clusters}
+pbmc <- FindClusters(pbmc, pc.use = 1:10, resolution = 0.6, print.output = 0, save.SNN = T)
+```
+
+Run tSNE
+```{r tsne}
+pbmc <- RunTSNE(pbmc, dims.use = 1:10, do.fast = T)
+```
+
+```{r tsne_plot}
+TSNEPlot(pbmc, do.label = T)
+```
+
+## Identify marker genes
+
+# B-cells
+```{r b_cell_markers}
+b.cell.markers <- FindMarkers(pbmc, ident.1 = 3, min.pct = 0.25)
+head(b.cell.markers, 20)
+```
+CD79A = B-cell antigen receptor complex-associated protein alpha chain
+
+# Tc-cells
+```{r t.c.cell.markers}
+t.c.cell.markers <- FindMarkers(pbmc, ident.1 = c(5,6,8), min.pct = 0.25)
+head(t.c.cell.markers, 20)
+```
+
+# Th-cells
+```{r t.h.cell.markers}
+t.h.cell.markers <- FindMarkers(pbmc, ident.1 = c(2,0,9), min.pct = 0.25)
+head(t.h.cell.markers, 20)
+```
+
+# Monocytes
+```{r monocyte.markers}
+monocyte.markers <- FindMarkers(pbmc, ident.1 = c(1,4), min.pct = 0.25)
+head(monocyte.markers, 20)
+```
+
+# Natural killer cells
+```{r nk.cell.markers}
+nk.cell.markers <- FindMarkers(pbmc, ident.1 = 7, min.pct = 0.25)
+head(nk.cell.markers, 20)
+```
+
+# Dendritic cells
+```{r dendritic.cell.markers}
+dendritic.cell.markers <- FindMarkers(pbmc, ident.1 = 10, min.pct = 0.25)
+head(dendritic.cell.markers, 20)
+```
+
+# Megakaryocytes
+```{r megakaryo.markers}
+megakaryo.markers <- FindMarkers(pbmc, ident.1 = 11, min.pct = 0.25)
+head(megakaryo.markers, 20)
+```
+
+MS4A1 and CD79A are known markers for B-cells.
+```{r violin_plot_b_cells}
+VlnPlot(pbmc, c("MS4A1", "CD79A")) 
+```
+
+Cluster 3 seems to be B-cells.
+```{r violin_plot_nkg7}
+VlnPlot(pbmc, c("NKG7"), use.raw = T, y.log = T)
+```
+
+NKG7 is a marker for Natural killer cells but is expressed in T-cells also.
+
+A few known marker genes
+```{r feature_plot}
+FeaturePlot(pbmc, c("MS4A1", "GNLY","CD3E","CD14","FCER1A","FCGR3A", "LYZ", "PPBP", "CD8A"), cols.use = c("grey","blue"))
+```
+
+Heatmaps can also be a good way to examine heterogeneity within/between clusters. The DoHeatmap() function will generate a heatmap for given cells and genes. In this case, we are plotting the top 20 markers (or all markers if less than 20) for each cluster.
+```{r heatmap_markers, warning=FALSE}
+pbmc.markers %>% group_by(cluster) %>% top_n(10, avg_diff) -> top10
+DoHeatmap(pbmc, genes.use = top10$gene, order.by.ident = TRUE, slim.col.label = TRUE, remove.key = TRUE)
+```
+Cluster 0 and 1 look similar
+
+Find the discriminating marker genes, between these clusters
+```{r cell_0_1_markers}
+cell.0.1.markers <- FindMarkers(pbmc, 0, 1)
+head(cell.0.1.markers, 10)
+```
+
+```{r feature_plot_cell_0_1_markers}
+FeaturePlot(pbmc, c("ANXA2", "S100A4", "CCR7"), cols.use = c("green", "blue"))
+```
+
+```{r}
+cd3.genes <- c("CD3E", "CD3D", "CD3G")
+```
+
+**NK cell markers**
+wikipedia: CD16+, CD56+ (NCAM1), CD3-, CD31, CD30, CD38
+abcam: CD3-, CD56+ (NCAM1), CD94+, NKp46+
+seurat: GNLY (Nk & T-cells), NKG7 (Nk & T-cells)
+```{r}
+FeaturePlot(pbmc, c(cd3.genes, "NCAM1", "NKG7", "GNLY"), cols.use = c("green", "blue"), reduction.use = "tsne")
+```
+CD3 genes should be absent. NCAM1, NKG7 & GNLY are known markers
+
+**B cell markers**
+CD45+(PTPRC) (also in T cells), CD19+, CD20+ (MS4A1), CD24+, CD38, CD22
+```{r}
+grep("^CD22", rownames(pbmc@data), value = T)
+
+FeaturePlot(pbmc, c("CD19", "PTPRC", "MS4A1", "CD38", "CD22"), cols.use = c("green", "blue"), reduction.use = "tsne")
+```
+
+**T cells**
+CD3 and PTPRC/CD45(also B cells) are known markers van T cells 
+```{r}
+FeaturePlot(pbmc, c(cd3.genes, "PTPRC"), cols.use = c("green", "blue"), reduction.use = "tsne")
+```
+
+CD4+ T(helper) markers: CD4+ IL7R+
+CD8+ T(cytotoxic) markers: CD8A, CD8B
+```{r}
+FeaturePlot(pbmc, c("CD8A", "CD8B"), cols.use = c("green", "blue"), reduction.use = "tsne")
+```
+
+**Monocytes**
+```{r}
+FeaturePlot(pbmc, c("CD14", "FCGR3B", "FCGR3A"), cols.use = c("green", "blue"), reduction.use = "tsne")
+```
+
+**Macrophage**
+CD11b+ (ITGAM), CD68+, CD163+
+```{r}
+FeaturePlot(pbmc, c("ITGAM", "CD68", "CD163"), cols.use = c("green", "blue"), reduction.use = "tsne")
+```
+
+Build a network with B cells
+```{r}
+load("./seurat_pbmc_6k.RData")
+
+length(pbmc@data[,1])
+
+b.cells <- pbmc@scale.data[,WhichCells(pbmc, 3)]
+t.c.cells <- pbmc@scale.data[,WhichCells(pbmc, c(4,7))]
+t.h.cells <- pbmc@scale.data[,WhichCells(pbmc, c(0,1))]
+monocytes <- pbmc@scale.data[,WhichCells(pbmc, c(2,5))]
+nk.cells <- pbmc@scale.data[,WhichCells(pbmc, 6)]
+dendritic.cells <- pbmc@scale.data[,WhichCells(pbmc, 8)]
+megakaryos <- pbmc@scale.data[,WhichCells(pbmc, 9)]
+
+# CCR5 CTLA4 FOXP3 HLA-DQA1 HLA.DQB1 HLA.DRB1 HNF1A IL2RA IL6 INS ITPR3 OAS1 PTPN22 SUMO4
+# CCR5: is expressed by T cells and macrophages, and is known to be an important co-receptor for macrophage-tropic virus, including HIV, to enter host cells.
+# Certain HLA haplotypes are associated with a higher risk of developing type 1 diabetes, with particular combinations of HLA-DQA1, HLA-DQB1, and HLA-DRB1 gene variations resulting in the highest risk
+# CTLA4: Mutations in this gene have been associated with insulin-dependent diabetes mellitus.
+
+b.cells.cor <- cor(t(b.cells), method="pearson")
+t.c.cells.cor <- cor(t(t.c.cells), method="pearson")
+t.h.cells.cor <- cor(t(t.h.cells), method="pearson")
+monocytes.cor <- cor(t(monocytes), method="pearson")
+nk.cells.cor <- cor(t(nk.cells), method="pearson")
+dendritic.cells.cor <- cor(t(dendritic.cells), method="pearson")
+megakaryos.cor <- cor(t(megakaryos), method="pearson")
+
+diabetes.genes <- c("CCR5", "CTLA4", "FOXP3", "HLA.DQA1", "HLA.DQB1", "HLA.DRB1", "IL2RA", "IL6", "ITPR3", "OAS1", "PTPN22", "SUMO4")
+
+b.cells.diabetes <- pbmc@scale.data[diabetes.genes, WhichCells(pbmc, 3)]
+b.cells.dia.cov <- cov(t(b.cells.diabetes), method = "pearson")
+b.cells.dia.cor <- cor(t(b.cells.diabetes), method="pearson")
+b.cells.dia.pca <- prcomp(b.cells.dia.cov)
+
+b.cells.dia.cor * b.cells.dia.cor
+b.cells.dia.network <- GeneNetwork(data = b.cells.dia.cor, start.gene = "CCR5", min.correlation = 0.85)
+b.dia.net = network(b.cells.dia.network@network, directed = FALSE)
+ggnet2(b.dia.net, label = T) + ggtitle("B cells")
+
+b.cells.cov <- cov(t(b.cells))
+b.cells.pca.cov <- prcomp(b.cells.cov)
+
+
+source(file = "GeneNetwork.R")
+
+gene.symbol <- "CCR5"
+min.correlation <- 0.85
+
+#is.correlated <- (t.c.cells.cor[gene.symbol,] > min.correlation | t.c.cells.cor[gene.symbol,] < -min.correlation)
+is.correlated <- order(abs(b.cells.cor[gene.symbol,]),decreasing = T)[1:5]
+corelated.genes <- b.cells.cor[gene.symbol, is.correlated]
+corelated.genes
+
+b.cell.network <- GeneNetwork(data = b.cells.cor, start.gene = "CCR5", min.correlation = 0.85)
+b.cell.network <- addGene(b.cell.network, gene.name = "HLA.DQB1", min.correlation = 0.85)
+t.c.cell.network <- GeneNetwork(data = t.c.cells.cor, start.gene = "CCR5", min.correlation = 0.85)
+t.c.cell.network <- addGene(t.c.cell.network, gene.name = "HLA.DQB1", min.correlation = 0.85)
+t.h.cell.network <- GeneNetwork(data = t.h.cells.cor, start.gene = "CCR5", min.correlation = 0.85)
+t.h.cell.network <- addGene(t.h.cell.network, gene.name = "HLA.DQB1", min.correlation = 0.85)
+monocytes.network <- GeneNetwork(data = monocytes.cor, start.gene = "CCR5", min.correlation = 0.85)
+monocytes.network <- addGene(monocytes.network, gene.name = "HLA.DQB1", min.correlation = 0.85)
+nk.cells.network <- GeneNetwork(data = nk.cells.cor, start.gene = "CCR5", min.correlation = 0.85)
+nk.cells.network <- addGene(nk.cells.network, gene.name = "HLA.DQB1", min.correlation = 0.85)
+dendritic.cells.network <- GeneNetwork(data = dendritic.cells.cor, start.gene = "CCR5", min.correlation = 0.85)
+dendritic.cells.network <- addGene(dendritic.cells.network, gene.name = "HLA.DQB1", min.correlation = 0.85)
+megakaryos.network <- GeneNetwork(data = megakaryos.cor, start.gene = "CCR5", min.correlation = 0.85)
+megakaryos.network <- addGene(megakaryos.network, gene.name = "HLA.DQB1", min.correlation = 0.85)
+
+library(GGally)
+library(network)
+library(sna)
+library(ggplot2)
+require(gridExtra)
+
+b.net = network(b.cell.network@network, directed = FALSE)
+t.c.net = network(t.c.cell.network@network, directed = FALSE)
+t.h.net = network(t.h.cell.network@network, directed = FALSE)
+monocytes.net = network(monocytes.network@network, directed = FALSE)
+n.k.net = network(nk.cells.network@network, directed = FALSE)
+dendritic.net = network(dendritic.cells.network@network, directed = FALSE)
+megakaryos.net = network(megakaryos.network@network, directed = FALSE)
+
+b.plot <- ggnet2(b.net, label = T) + ggtitle("B cells")
+t.c.plot <- ggnet2(t.c.net, label = T) + ggtitle("T-c cells")
+t.h.plot <- ggnet2(t.h.net, label = T) + ggtitle("T-h cells")
+monocytes.plot <- ggnet2(monocytes.net, label = T) + ggtitle("Monocytes")
+n.k.plot <- ggnet2(n.k.net, label = T) + ggtitle("Natural killer cells")
+dendritic.plot <- ggnet2(dendritic.net, label = T) + ggtitle("Dentritic cells")
+megakaryos.plot <- ggnet2(megakaryos.net, label = T) + ggtitle("Megakaryocytes")
+
+b.plot;t.c.plot;t.h.plot
+monocytes.plot;n.k.plot;dendritic.plot;megakaryos.plot
+
+grid.arrange(b.plot, t.c.plot, t.h.plot, nrow=2, ncol=2)
+```
+

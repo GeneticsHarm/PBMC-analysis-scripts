@@ -1,0 +1,13 @@
+Homo Sapiens Cell-Cycle Gene Data: The Homo Sapien gene data was downloaded from biomart, hosted by Ensembl. 
+The genes are from GRCh38.p5. The filter used to acquire the list of genes was the GO term GO:0007049 (cell cycle).
+The attributes selected were: "Ensembl Gene ID", "HGNC symbol" ,"EntrezGene ID" and "Unigene ID".
+There are 1839 unique values for the Ensembl gene ID's, 1741 unique values for the HGNC symbols, 
+1745 unique values for the Entrez gene ID's and 1339 unique values for the Unigene ID's.
+
+Mus Musculus Cell-Cycle Gene Data: The Mus Musculus gene data was also downloaded from biomart hosted by Ensembl.
+The genes are from GRCm38.p4. The filter used to acquire the list of genes was the GO term GO:0007049 (cell cycle).
+The attributes selected were: "Ensembl Gene ID", "MGI symbol" , "EntrezGene ID" and "Unigene ID".
+There are 1434 unique values for the Ensembl gene ID's, 1423 unique values for the MGI symbols,
+1436 unique values for the the Entrez gene ID's and 1103 unique values for the Unigene ID's. 
+
+The web address is: http://useast.ensembl.org/biomart/martview
