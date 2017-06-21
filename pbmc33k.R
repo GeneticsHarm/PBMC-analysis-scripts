@@ -15,6 +15,8 @@ pbmc.data <- read.table("~/Documents/Stage/Matrices/count-matrix-33k.tsv", row.n
 # Remove all genes with zero counts.
 pbmc.data <- pbmc.data[apply(pbmc.data, 1, function(x) !all(x==0)),]
 
+pbmc.data[1:10,1:3]
+
 # Get a dataframe with gene names corresponding to the ensemle id's in the data.
 library(biomaRt)
 ensembl = useMart("ensembl", dataset="hsapiens_gene_ensembl")
@@ -22,6 +24,15 @@ gene.name.table <- getBM(attributes = c("external_gene_name", "ensembl_gene_id")
                          filters = "ensembl_gene_id",
                          values = rownames(pbmc.data),
                          mart = ensembl)
+
+rrna.table <- getBM(attributes = c("external_gene_name", "ensembl_gene_id"), 
+                         filters = "biotype",
+                         values = "rRNA",
+                         mart = ensembl)
+
+rrna.table$ensembl_gene_id
+
+listFilters(mart = ensembl)
 
 # Not all ensembl ids are present in the BioMart database, so only set when available.
 get.gene.name <- function(ensemble.id) {
@@ -35,10 +46,12 @@ get.gene.name <- function(ensemble.id) {
 rownames(pbmc.data) <- make.names(lapply(rownames(pbmc.data), get.gene.name), unique = T)
 
 pbmc.data.sparse <- Matrix(as.matrix(pbmc.data), sparse = T)
+pbmc.data.sparse[1:10,1:3]
 
 ## Load this file to start from this point
 #save(pbmc.data.sparse, file = "./data/33k_sparse.Rda")
 #load("./data/33k_sparse.Rda")
+rm(exp.data, pbmc.data, pbmc33k, pbmc33k.merged)
 
 dim(pbmc.data.sparse)
 
@@ -50,6 +63,7 @@ pbmc33k <- Setup(pbmc33k, min.cells = 3, min.genes = 200, project = "10X_PBMC", 
 length(pbmc33k@cell.names) # 33118 / 33123
 dim(pbmc33k@data)
 dim(pbmc33k@data) # 23734 33118
+pbmc33k@data
 
 mito.genes <- grep("^MT\\.", rownames(pbmc33k@data), value = T)
 pbmc33k@data[mito.genes, ]
@@ -107,7 +121,7 @@ pbmc33k@var.genes
 pbmc33k <- RunTSNE(pbmc33k, dims.use = 1:25, do.fast = T)
 
 #save.SNN means that you can easily re-run with different resolution values. Here we run with a few different res v
-pbmc33k <- FindClusters(pbmc33k ,pc.use = 1:25, resolution = seq(2,4,0.5), save.SNN = T, do.sparse = T)
+pbmc33k <- FindClusters(pbmc33k ,pc.use = 1:25, resolution = 4, save.SNN = T, do.sparse = T)
 
 #pbmc33k_20=FindClusters(pbmc33k,pc.use = 1:25,resolution = seq(0.6,4,0.1),save.SNN = T,do.sparse = T,k.param = 20)
 #save(pbmc33k,file = "~/Projects/datasets/pbmc33k/pbmc33k_nbinom_final.Robj")
@@ -208,7 +222,7 @@ FindMarkers(pbmc33k.downsampled, ident.1 = 17,  only.pos = T)
 #save(pbmc33k, file = "./data/seurat_33k_final.Rda")
 #save(pbmc33k.downsampled, file = "./data/seurat_33k_downsampled.Rda")
 #load("./data/seurat_33k_final.Rda")
-#load("./data/seurat_33k_merged")
+load("../pbmc6k//data/seurat_33k_merged")
 
 #rename cluster IDs
 new_ids=c("Megakaryocytes","Monocytes",3,"NK_1","NK_2","B_Cells_Plasma","Dendritic_Cells","B_Cells_1","B_Cells_2","B_Cells_3","T_Cells_CD4+_1","T_Cells_CD8+_1","T_Cells_CD4+_2","T_Cells_CD8+_2","T_Cells_CD8+_3","T_Cells_CD8+_4")
@@ -224,13 +238,37 @@ markers.3[1:30,]
 markers.6 = FindMarkers(pbmc33k.merged, ident.1 = c(6), min.pct = 0.25)
 markers.6[1:30,]
 
+
+
 pbmc33k <- pbmc33k.own
-load("./data/seurat_33k_merged")
+load("../pbmc6k//data/seurat_33k_merged")
 pbmc33k.satija <- pbmc33k
+
+#save(pbmc33k, file = "../pbmc6k/data/seurat_33k_ensembl.Rda")
 
 TSNEPlot(pbmc33k.merged, do.label = F, pt.size = 0.5, label.size = 5)
 TSNEPlot(pbmc33k.satija, do.label = T)
 TSNEPlot(pbmc33k, do.label = T)
 TSNEPlot(pbmc33k, do.label = F , pt.size = 0.5)
 
+## SNN
 
+load("../pbmc6k/data/seurat_33k_ensembl.Rda")
+head(pbmc33k.merged@raw.data)
+
+rownames(pbmc33k.merged@raw.data)[1:10]
+
+rrna.table
+
+TSNEPlot(pbmc33k.merged)
+
+rownames(pbmc33k.merged@raw.data) %in% rrna.table$external_gene_name
+
+rrrna <- rowSums(as.matrix(pbmc33k.merged@raw.data[rownames(pbmc33k.merged@raw.data) %in% rrna.table$external_gene_name,]))
+total <- rowSums(as.matrix(pbmc33k.merged@raw.data))
+
+sorted.totals <- sort(total, decreasing = T)[1:100]
+
+sum(sorted.totals[1:5]) / sum(sorted.totals)
+
+sum(rrrna) / sum(total)

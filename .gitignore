@@ -1,0 +1,9 @@
+.Rproj.user
+.Rhistory
+.RData
+.RDataTmp
+.Ruserdata
+data/
+traitfile.csv
+traitfile-test.tsv
+markdown/
